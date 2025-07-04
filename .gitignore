@@ -32,3 +32,24 @@ build/
 # Temporary files
 temp/
 tmp/
+
+# Database files
+*.sqlite
+*.sqlite3
+*.db
+
+# Coverage reports
+coverage/
+
+# Production builds
+dist/
+build/
+
+# PM2 files
+ecosystem.config.js
+
+# Docker volumes
+docker/volumes/
+
+# n8n workflow backups
+workflows/backups/

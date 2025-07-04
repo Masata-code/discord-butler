@@ -1,0 +1,425 @@
+{
+  "name": "Discord Butler - Main Workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "discord-butler-webhook",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "4a9b5d4e-webhook",
+      "name": "Discord Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "position": [250, 300],
+      "webhookId": "discord-butler-main",
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "functionCode": "// Discord Webhook検証\nconst { type, data } = $input.first().json;\n\n// Discord ping検証\nif (type === 1) {\n  return [{ json: { type: 1 } }];\n}\n\n// 通常のメッセージ処理\nif (type === 2 && data) {\n  const userId = data.member?.user?.id || data.user?.id;\n  const username = data.member?.user?.username || data.user?.username;\n  const message = data.options?.[0]?.value || '';\n  const channelId = data.channel_id;\n  \n  return [{\n    json: {\n      userId,\n      username,\n      message,\n      channelId,\n      interactionId: data.id,\n      interactionToken: data.token,\n      timestamp: new Date().toISOString()\n    }\n  }];\n}\n\nthrow new Error('Invalid Discord interaction type');"
+      },
+      "id": "b3c6d7e8-parser",
+      "name": "Parse Discord Data",
+      "type": "n8n-nodes-base.code",
+      "position": [450, 300],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM user_profiles WHERE discord_id = $1",
+        "additionalFields": {
+          "queryParams": "={{ [$json.userId] }}"
+        }
+      },
+      "id": "e5f6g7h8-db-user",
+      "name": "Get User Profile",
+      "type": "n8n-nodes-base.postgres",
+      "position": [650, 200],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Discord Butler DB"
+        }
+      },
+      "typeVersion": 2.4
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.length }}",
+              "operation": "equal",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "i9j0k1l2-if",
+      "name": "New User?",
+      "type": "n8n-nodes-base.if",
+      "position": [850, 300],
+      "typeVersion": 1
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO user_profiles (user_id, discord_id, discord_username) VALUES ($1, $2, $3) RETURNING *",
+        "additionalFields": {
+          "queryParams": "={{ [$('Parse Discord Data').item.json.userId, $('Parse Discord Data').item.json.userId, $('Parse Discord Data').item.json.username] }}"
+        }
+      },
+      "id": "m3n4o5p6-create-user",
+      "name": "Create User Profile",
+      "type": "n8n-nodes-base.postgres",
+      "position": [1050, 400],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Discord Butler DB"
+        }
+      },
+      "typeVersion": 2.4
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO sessions (user_id) VALUES ($1) RETURNING session_id",
+        "additionalFields": {
+          "queryParams": "={{ [$json.user_id || $json[0].user_id] }}"
+        }
+      },
+      "id": "q7r8s9t0-session",
+      "name": "Create Session",
+      "type": "n8n-nodes-base.postgres",
+      "position": [1250, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Discord Butler DB"
+        }
+      },
+      "typeVersion": 2.4
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "message",
+        "modelId": "gpt-4-turbo-preview",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "あなたはAIツール推薦の専門家です。ユーザーの作業内容を分析し、以下のJSON形式で応答してください：\n{\n  \"task_type\": \"作業の種類\",\n  \"complexity\": 1-10の数値,\n  \"required_features\": [\"必要な機能のリスト\"],\n  \"skill_level\": \"beginner/intermediate/advanced\",\n  \"domain\": \"content_creation/data_analysis/programming/design/research/business/other\",\n  \"clarification_needed\": true/false,\n  \"clarification_questions\": [\"明確化が必要な質問\"]\n}"
+            },
+            {
+              "role": "user",
+              "content": "={{ $('Parse Discord Data').item.json.message }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.7,
+          "maxTokens": 500,
+          "responseFormat": {
+            "type": "json_object"
+          }
+        }
+      },
+      "id": "u1v2w3x4-analyze",
+      "name": "Analyze Task",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "position": [1450, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "2",
+          "name": "OpenAI API"
+        }
+      },
+      "typeVersion": 1.5
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM ai_tools WHERE \n  category = $1 AND \n  is_active = true AND\n  skill_level_min <= $2 AND\n  skill_level_max >= $2 AND\n  $3 = ANY(supported_languages)\nORDER BY popularity_score DESC, performance_score DESC\nLIMIT 10",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $json.task_analysis.domain,\n  $json.task_analysis.complexity,\n  'ja'\n] }}"
+        }
+      },
+      "id": "y5z6a7b8-tools",
+      "name": "Search AI Tools",
+      "type": "n8n-nodes-base.postgres",
+      "position": [1650, 300],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Discord Butler DB"
+        }
+      },
+      "typeVersion": 2.4
+    },
+    {
+      "parameters": {
+        "functionCode": "// スコアリング関数\nconst tools = $input.first().json;\nconst taskProfile = $('Analyze Task').first().json.task_analysis;\nconst userProfile = $('Get User Profile').first().json[0] || $('Create User Profile').first().json;\n\nconst calculateScore = (tool) => {\n  let score = 0;\n  \n  // タスク適合性（30%）\n  if (tool.category === taskProfile.domain) score += 0.3;\n  \n  // スキルレベル一致度（20%）\n  const skillMatch = 1 - Math.abs(tool.skill_level_min - taskProfile.complexity) / 10;\n  score += skillMatch * 0.2;\n  \n  // コスト効率（25%）\n  const costScore = tool.pricing_model.free_tier ? 0.25 : 0.1;\n  score += costScore;\n  \n  // パフォーマンス（15%）\n  score += (tool.performance_score / 10) * 0.15;\n  \n  // 言語サポート（5%）\n  if (tool.supported_languages.includes('ja')) score += 0.05;\n  \n  // コンテキストウィンドウ（5%）\n  if (tool.context_window_size > 100000) score += 0.05;\n  \n  return score;\n};\n\nconst scoredTools = tools.map(tool => ({\n  ...tool,\n  recommendation_score: calculateScore(tool)\n}));\n\nconst topTools = scoredTools\n  .sort((a, b) => b.recommendation_score - a.recommendation_score)\n  .slice(0, 3);\n\nreturn [{ json: { recommended_tools: topTools } }];"
+      },
+      "id": "c9d0e1f2-score",
+      "name": "Score & Rank Tools",
+      "type": "n8n-nodes-base.code",
+      "position": [1850, 300],
+      "typeVersion": 2
+    },
+    {
+      "parameters": {
+        "resource": "chat",
+        "operation": "message",
+        "modelId": "claude-3-opus-20240229",
+        "messages": {
+          "values": [
+            {
+              "role": "system",
+              "content": "あなたはAI初心者向けのガイド作成専門家です。以下の形式で、具体的で実践的な使用ガイドを日本語で作成してください：\n\n## おすすめAIツール\n\n### 1. [ツール名]\n**特徴**: 簡潔な説明\n**料金**: 具体的な料金体系\n**こんな人におすすめ**: 対象ユーザー\n\n#### 使い方\n1. アカウント作成の手順\n2. 基本的な使い方\n3. あなたのタスクでの具体的な使用例\n\n#### サンプルプロンプト\n```\n具体的なプロンプト例\n```\n\n#### 💡 コツ\n- 実践的なアドバイス\n\n---\n\n必ず3つのツールについて説明し、初心者でも迷わないような具体的な手順を含めてください。"
+            },
+            {
+              "role": "user",
+              "content": "ユーザーのタスク: {{ $('Parse Discord Data').item.json.message }}\n\n推奨ツール情報:\n{{ JSON.stringify($json.recommended_tools, null, 2) }}"
+            }
+          ]
+        },
+        "options": {
+          "temperature": 0.3,
+          "maxTokens": 2000
+        }
+      },
+      "id": "g3h4i5j6-guide",
+      "name": "Generate Guide",
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "position": [2050, 300],
+      "credentials": {
+        "openAiApi": {
+          "id": "3",
+          "name": "Claude API"
+        }
+      },
+      "typeVersion": 1.5
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO tool_usage_history (session_id, user_id, tool_id, recommendation_score) \nSELECT $1, $2, unnest($3::uuid[]), unnest($4::decimal[])",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $('Create Session').item.json.session_id,\n  $('Get User Profile').first().json[0]?.user_id || $('Create User Profile').first().json.user_id,\n  $('Score & Rank Tools').item.json.recommended_tools.map(t => t.id),\n  $('Score & Rank Tools').item.json.recommended_tools.map(t => t.recommendation_score)\n] }}"
+        }
+      },
+      "id": "k7l8m9n0-history",
+      "name": "Save Recommendations",
+      "type": "n8n-nodes-base.postgres",
+      "position": [2250, 400],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Discord Butler DB"
+        }
+      },
+      "typeVersion": 2.4
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://discord.com/api/v10/interactions/{{ $('Parse Discord Data').item.json.interactionId }}/{{ $('Parse Discord Data').item.json.interactionToken }}/callback",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "type",
+              "value": "4"
+            },
+            {
+              "name": "data.content",
+              "value": "={{ $('Generate Guide').item.json.choices[0].message.content }}"
+            },
+            {
+              "name": "data.flags",
+              "value": "64"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "o1p2q3r4-respond",
+      "name": "Send Discord Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "position": [2450, 300],
+      "typeVersion": 4.1
+    },
+    {
+      "parameters": {
+        "functionCode": "// エラーログの記録\nconst error = $input.first().json.error;\nconst context = {\n  workflowId: $workflow.id,\n  executionId: $execution.id,\n  nodeId: error.node?.name,\n  timestamp: new Date().toISOString()\n};\n\nreturn [{\n  json: {\n    error_type: error.name || 'UnknownError',\n    error_message: error.message,\n    error_stack: error.stack,\n    severity: 'high',\n    context\n  }\n}];"
+      },
+      "id": "s5t6u7v8-error",
+      "name": "Format Error",
+      "type": "n8n-nodes-base.code",
+      "position": [1450, 500],
+      "typeVersion": 2,
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO error_logs (session_id, user_id, error_type, error_message, error_stack, severity, context) \nVALUES ($1, $2, $3, $4, $5, $6, $7)",
+        "additionalFields": {
+          "queryParams": "={{ [\n  $('Create Session').item.json?.session_id || null,\n  $('Get User Profile').first().json[0]?.user_id || null,\n  $json.error_type,\n  $json.error_message,\n  $json.error_stack,\n  $json.severity,\n  $json.context\n] }}"
+        }
+      },
+      "id": "w9x0y1z2-log",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.postgres",
+      "position": [1650, 500],
+      "credentials": {
+        "postgres": {
+          "id": "1",
+          "name": "Discord Butler DB"
+        }
+      },
+      "typeVersion": 2.4,
+      "continueOnFail": true
+    }
+  ],
+  "connections": {
+    "Discord Webhook": {
+      "main": [
+        [
+          {
+            "node": "Parse Discord Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Discord Data": {
+      "main": [
+        [
+          {
+            "node": "Get User Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get User Profile": {
+      "main": [
+        [
+          {
+            "node": "New User?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New User?": {
+      "main": [
+        [
+          {
+            "node": "Create User Profile",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create User Profile": {
+      "main": [
+        [
+          {
+            "node": "Create Session",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Session": {
+      "main": [
+        [
+          {
+            "node": "Analyze Task",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Analyze Task": {
+      "main": [
+        [
+          {
+            "node": "Search AI Tools",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search AI Tools": {
+      "main": [
+        [
+          {
+            "node": "Score & Rank Tools",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score & Rank Tools": {
+      "main": [
+        [
+          {
+            "node": "Generate Guide",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Guide": {
+      "main": [
+        [
+          {
+            "node": "Save Recommendations",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Discord Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": "error-handler-workflow"
+  },
+  "staticData": null,
+  "pinData": {},
+  "versionId": "d8f3e9a0-1234-5678-9abc-def012345678",
+  "triggerCount": 1
+}
